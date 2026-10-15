@@ -148,6 +148,47 @@ describe("transformSchemaObject > object", () => {
       },
     ],
     [
+      "unevaluatedProperties > preserves property types from allOf",
+      {
+        given: {
+          type: "object",
+          allOf: [{ type: "object", properties: { count: { type: "number" } } }],
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    [key: string]: string | number;
+} & {
+    count?: number;
+}`,
+      },
+    ],
+    [
+      "unevaluatedProperties > preserves property types from referenced allOf",
+      {
+        given: {
+          type: "object",
+          allOf: [{ $ref: "#/components/schemas/Count" }],
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    [key: string]: string | number;
+} & components["schemas"]["Count"]`,
+        options: {
+          ...DEFAULT_OPTIONS,
+          ctx: {
+            ...DEFAULT_CTX,
+            resolve<T>($ref: string) {
+              return (
+                $ref === "#/components/schemas/Count"
+                  ? { type: "object", properties: { count: { type: "number" } } }
+                  : undefined
+              ) as T | undefined;
+            },
+          },
+        },
+      },
+    ],
+    [
       "patternProperties > empty object",
       {
         given: { type: "object", patternProperties: {} },

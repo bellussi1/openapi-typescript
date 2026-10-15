@@ -734,5 +734,7 @@ export type $defs = Record<string, SchemaObject>;
 export interface TransformNodeOptions {
   path?: string;
   schema?: SchemaObject | ReferenceObject;
+  /** Internal guard shared while resolving composition refs for unevaluatedProperties. */
+  unevaluatedPropertiesRefs?: Set<string>;
   ctx: GlobalContext;
 }

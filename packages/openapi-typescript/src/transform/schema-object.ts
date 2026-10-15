@@ -214,12 +214,17 @@ export function transformSchemaObjectWithComposition(
    */
 
   /** Collect oneOf/anyOf */
+  const unevaluatedPropertiesRefs = options.unevaluatedPropertiesRefs ?? new Set<string>();
+  const compositionOptions = {
+    ...options,
+    unevaluatedPropertiesRefs,
+  };
   function collectUnionCompositions(items: (SchemaObject | ReferenceObject)[], unionKey: "anyOf" | "oneOf") {
     const output: ts.TypeNode[] = [];
     for (const [index, item] of items.entries()) {
       output.push(
         transformSchemaObject(item, {
-          ...options,
+          ...compositionOptions,
           // include index in path so generated names from nested enums/enumValues are unique
           path: createRef([options.path, unionKey, String(index)]),
         }),
@@ -237,9 +242,9 @@ export function transformSchemaObjectWithComposition(
       // if this is a $ref, use WithRequired<X, Y> if parent specifies required properties
       // (but only for valid keys)
       if ("$ref" in item) {
-        itemType = transformSchemaObject(item, options);
+        itemType = transformSchemaObject(item, compositionOptions);
 
-        const resolved = options.ctx.resolve<SchemaObject>(item.$ref);
+        const resolved = compositionOptions.ctx.resolve<SchemaObject>(item.$ref);
 
         // make keys required, if necessary
         if (
@@ -247,12 +252,12 @@ export function transformSchemaObjectWithComposition(
           typeof resolved === "object" &&
           "properties" in resolved &&
           // we have already handled this item (discriminator property was already added as required)
-          !options.ctx.discriminators.refsHandled.includes(item.$ref)
+          !compositionOptions.ctx.discriminators.refsHandled.includes(item.$ref)
         ) {
           // add WithRequired<X, Y> if necessary
           const validRequired = (required ?? []).filter((key) => !!resolved.properties?.[key]);
           if (validRequired.length) {
-            itemType = tsWithRequired(itemType, validRequired, options.ctx.injectFooter);
+            itemType = tsWithRequired(itemType, validRequired, compositionOptions.ctx.injectFooter);
           }
         }
       }
@@ -262,7 +267,7 @@ export function transformSchemaObjectWithComposition(
         if (typeof item === "object" && Array.isArray(item.required)) {
           itemRequired.push(...item.required);
         }
-        itemType = transformSchemaObject({ ...item, required: itemRequired }, options);
+        itemType = transformSchemaObject({ ...item, required: itemRequired }, compositionOptions);
       }
 
       const discriminator =
@@ -276,23 +281,90 @@ export function transformSchemaObjectWithComposition(
     return output;
   }
 
+  /** Collect declared properties from a transformed object or composition type. */
+  function collectDeclaredPropertyTypes(type: ts.TypeNode): ts.TypeNode[] {
+    if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+      return type.types.flatMap(collectDeclaredPropertyTypes);
+    }
+    if (ts.isParenthesizedTypeNode(type)) {
+      return collectDeclaredPropertyTypes(type.type);
+    }
+    if (ts.isTypeLiteralNode(type)) {
+      return type.members.flatMap((member) => {
+        // $defs is represented as a helper property in the generated type,
+        // but it is not an evaluated JSON Schema property.
+        if (
+          !ts.isPropertySignature(member) ||
+          !member.type ||
+          (member.name && ts.isStringLiteral(member.name) && member.name.text === "$defs")
+        ) {
+          return [];
+        }
+        return [member.type];
+      });
+    }
+    return [];
+  }
+
+  /**
+   * Referenced composition schemas stay as TypeReferenceNodes in the output,
+   * so resolve them while collecting properties accepted by an
+   * unevaluatedProperties index signature.
+   */
+  function collectComposedPropertyTypes(
+    schema: SchemaObject | ReferenceObject,
+    path: string | undefined,
+    seenRefs = unevaluatedPropertiesRefs,
+  ): ts.TypeNode[] {
+    if ("$ref" in schema) {
+      if (seenRefs.has(schema.$ref)) {
+        return [];
+      }
+      seenRefs.add(schema.$ref);
+      try {
+        const resolved = compositionOptions.ctx.resolve<SchemaObject>(schema.$ref);
+        if (!resolved || typeof resolved !== "object") {
+          return [];
+        }
+
+        return collectComposedPropertyTypes(resolved, schema.$ref, seenRefs);
+      } finally {
+        seenRefs.delete(schema.$ref);
+      }
+    }
+
+    // Resolve only this schema's direct properties here. Composition members
+    // are visited below, which avoids expanding a referenced schema as a whole.
+    const properties = "properties" in schema ? (schema.properties ?? {}) : {};
+    const validProperties = Object.fromEntries(
+      Object.entries(properties).filter(([, property]) => {
+        return (
+          (typeof property === "object" || typeof property === "boolean") &&
+          property !== null &&
+          !Array.isArray(property)
+        );
+      }),
+    ) as Record<string, SchemaObject | ReferenceObject>;
+    const coreType = transformSchemaObjectCore({ ...schema, properties: validProperties } as SchemaObject, {
+      ...compositionOptions,
+      path,
+    });
+    const output = coreType ? collectDeclaredPropertyTypes(coreType) : [];
+    for (const compositionKey of ["allOf", "anyOf", "oneOf"] as const) {
+      for (const [index, item] of (schema[compositionKey] ?? []).entries()) {
+        output.push(...collectComposedPropertyTypes(item, createRef([path, compositionKey, String(index)]), seenRefs));
+      }
+    }
+    return output;
+  }
+
   // compile final type
   let finalType: ts.TypeNode | undefined;
 
-  // core + allOf: intersect
-  const coreObjectType = transformSchemaObjectCore(schemaObject, options);
+  // collect compositions before transforming the core so their declared
+  // properties can be included in unevaluatedProperties' string index type.
   const allOfType = collectAllOfCompositions(schemaObject.allOf ?? [], schemaObject.required);
-  if (coreObjectType || allOfType.length) {
-    const allOf: ts.TypeNode | undefined = allOfType.length ? tsIntersection(allOfType) : undefined;
-    finalType = tsIntersection([...(coreObjectType ? [coreObjectType] : []), ...(allOf ? [allOf] : [])]);
-  }
-  // anyOf: union
-  // (note: this may seem counterintuitive, but as TypeScript’s unions are not true XORs, they mimic behavior closer to anyOf than oneOf)
   const anyOfType = collectUnionCompositions(schemaObject.anyOf ?? [], "anyOf");
-  if (anyOfType.length) {
-    finalType = tsUnion([...(finalType ? [finalType] : []), ...anyOfType]);
-  }
-  // oneOf: union (within intersection with other types, if any)
   const oneOfType = collectUnionCompositions(
     schemaObject.oneOf ||
       ("type" in schemaObject &&
@@ -301,6 +373,38 @@ export function transformSchemaObjectWithComposition(
       [],
     "oneOf",
   );
+  const compositionTypes = [...allOfType, ...anyOfType, ...oneOfType];
+  const seenCompositionRefs = unevaluatedPropertiesRefs;
+  const hasExplicitUnevaluatedProperties =
+    typeof schemaObject.unevaluatedProperties === "object" &&
+    schemaObject.unevaluatedProperties !== null &&
+    Object.keys(schemaObject.unevaluatedProperties).length > 0;
+  const composedPropertyTypes = hasExplicitUnevaluatedProperties
+    ? [
+        ...compositionTypes.flatMap(collectDeclaredPropertyTypes),
+        ...[...(schemaObject.allOf ?? []), ...(schemaObject.anyOf ?? []), ...(schemaObject.oneOf ?? [])].flatMap(
+          (item, index) =>
+            collectComposedPropertyTypes(
+              item,
+              createRef([options.path, "composition", String(index)]),
+              seenCompositionRefs,
+            ),
+        ),
+      ]
+    : [];
+
+  // core + allOf: intersect
+  const coreObjectType = transformSchemaObjectCore(schemaObject, compositionOptions, composedPropertyTypes);
+  if (coreObjectType || allOfType.length) {
+    const allOf: ts.TypeNode | undefined = allOfType.length ? tsIntersection(allOfType) : undefined;
+    finalType = tsIntersection([...(coreObjectType ? [coreObjectType] : []), ...(allOf ? [allOf] : [])]);
+  }
+  // anyOf: union
+  // (note: this may seem counterintuitive, but as TypeScript’s unions are not true XORs, they mimic behavior closer to anyOf than oneOf)
+  if (anyOfType.length) {
+    finalType = tsUnion([...(finalType ? [finalType] : []), ...anyOfType]);
+  }
+  // oneOf: union (within intersection with other types, if any)
   if (oneOfType.length) {
     // note: oneOf is the only type that may include primitives
     if (oneOfType.every(tsIsPrimitive)) {
@@ -358,7 +462,11 @@ function shouldTransformToTsEnum(options: TransformNodeOptions, schemaObject: Sc
 /**
  * Handle SchemaObject minus composition (anyOf/allOf/oneOf)
  */
-function transformSchemaObjectCore(schemaObject: SchemaObject, options: TransformNodeOptions): ts.TypeNode | undefined {
+function transformSchemaObjectCore(
+  schemaObject: SchemaObject,
+  options: TransformNodeOptions,
+  composedPropertyTypes: ts.TypeNode[] = [],
+): ts.TypeNode | undefined {
   if ("type" in schemaObject && schemaObject.type) {
     if (typeof options.ctx.transform === "function") {
       const result = options.ctx.transform(schemaObject, options);
@@ -499,7 +607,7 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
 
   // type: object
   const coreObjectType: ts.TypeElement[] = [];
-  const unevaluatedPropertyTypes: ts.TypeNode[] = [];
+  const unevaluatedPropertyTypes: ts.TypeNode[] = [...composedPropertyTypes];
 
   // discriminators: explicit mapping on schema object
   for (const k of ["allOf", "anyOf"] as const) {
