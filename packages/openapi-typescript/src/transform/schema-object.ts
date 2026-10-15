@@ -27,6 +27,8 @@ import {
 import { createDiscriminatorProperty, createRef, getEntries } from "../lib/utils.js";
 import type { ReferenceObject, SchemaObject, TransformNodeOptions } from "../types.js";
 
+const GENERATED_DEFS_HELPER = Symbol("generatedDefsHelper");
+
 /**
  * Transform SchemaObject nodes (4.8.24)
  * @see https://spec.openapis.org/oas/v3.1.0#schema-object
@@ -282,22 +284,51 @@ export function transformSchemaObjectWithComposition(
   }
 
   /** Collect declared properties from a transformed object or composition type. */
-  function collectDeclaredPropertyTypes(type: ts.TypeNode): ts.TypeNode[] {
+  function collectDeclaredPropertyTypes(type: ts.TypeNode, omittedProperties = new Set<string>()): ts.TypeNode[] {
     if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
-      return type.types.flatMap(collectDeclaredPropertyTypes);
+      return type.types.flatMap((child) => collectDeclaredPropertyTypes(child, omittedProperties));
     }
     if (ts.isParenthesizedTypeNode(type)) {
-      return collectDeclaredPropertyTypes(type.type);
+      return collectDeclaredPropertyTypes(type.type, omittedProperties);
+    }
+    if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) && type.typeName.text === "Omit") {
+      const [omittedType, keysType] = type.typeArguments ?? [];
+      if (!omittedType || !keysType) {
+        return [];
+      }
+      const keys = new Set(omittedProperties);
+      const collectKeys = (keyType: ts.TypeNode) => {
+        if (ts.isUnionTypeNode(keyType)) {
+          keyType.types.forEach(collectKeys);
+        } else if (ts.isIdentifier(keyType) && keyType.text.startsWith('"')) {
+          try {
+            const key = JSON.parse(keyType.text);
+            if (typeof key === "string") {
+              keys.add(key);
+            }
+          } catch {
+            // Ignore non-literal identifiers in the Omit key type.
+          }
+        } else if (ts.isLiteralTypeNode(keyType) && ts.isStringLiteral(keyType.literal)) {
+          keys.add(keyType.literal.text);
+        }
+      };
+      collectKeys(keysType);
+      return collectDeclaredPropertyTypes(omittedType, keys);
     }
     if (ts.isTypeLiteralNode(type)) {
       return type.members.flatMap((member) => {
-        // $defs is represented as a helper property in the generated type,
-        // but it is not an evaluated JSON Schema property.
-        const isDefs =
+        const propertyName =
           member.name &&
-          ((ts.isIdentifier(member.name) && member.name.text === "$defs") ||
-            (ts.isStringLiteral(member.name) && member.name.text === "$defs"));
-        if (!ts.isPropertySignature(member) || !member.type || isDefs) {
+          (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name))
+            ? member.name.text
+            : undefined;
+        if (
+          !ts.isPropertySignature(member) ||
+          !member.type ||
+          GENERATED_DEFS_HELPER in member ||
+          (propertyName !== undefined && omittedProperties.has(propertyName))
+        ) {
           return [];
         }
         return [member.type];
@@ -371,7 +402,7 @@ export function transformSchemaObjectWithComposition(
     Object.keys(schemaObject.unevaluatedProperties).length > 0;
   const composedPropertyTypes = hasExplicitUnevaluatedProperties
     ? [
-        ...compositionTypes.flatMap(collectDeclaredPropertyTypes),
+        ...compositionTypes.flatMap((compositionType) => collectDeclaredPropertyTypes(compositionType)),
         ...[...(schemaObject.allOf ?? []), ...(schemaObject.anyOf ?? []), ...(schemaObject.oneOf ?? [])].flatMap(
           (item) => collectReferencedCompositionPropertyTypes(item, seenCompositionRefs),
         ),
@@ -749,14 +780,14 @@ function transformSchemaObjectCore(
         addJSDocComment(v, property);
         defKeys.push(property);
       }
-      coreObjectType.push(
-        ts.factory.createPropertySignature(
-          /* modifiers     */ undefined,
-          /* name          */ tsPropertyIndex("$defs"),
-          /* questionToken */ undefined,
-          /* type          */ ts.factory.createTypeLiteralNode(defKeys),
-        ),
+      const defsHelper = ts.factory.createPropertySignature(
+        /* modifiers     */ undefined,
+        /* name          */ tsPropertyIndex("$defs"),
+        /* questionToken */ undefined,
+        /* type          */ ts.factory.createTypeLiteralNode(defKeys),
       );
+      Object.defineProperty(defsHelper, GENERATED_DEFS_HELPER, { value: true });
+      coreObjectType.push(defsHelper);
     }
 
     // additionalProperties / patternProperties

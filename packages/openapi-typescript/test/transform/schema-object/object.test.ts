@@ -206,6 +206,51 @@ describe("transformSchemaObject > object", () => {
       },
     ],
     [
+      "unevaluatedProperties > preserves a declared $defs property",
+      {
+        given: {
+          type: "object",
+          allOf: [
+            {
+              type: "object",
+              properties: { $defs: { type: "number" } },
+            },
+          ],
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    [key: string]: string | number;
+} & {
+    $defs?: number;
+}`,
+      },
+    ],
+    [
+      "unevaluatedProperties > preserves declared property types from discriminated allOf",
+      {
+        given: {
+          type: "object",
+          allOf: [
+            {
+              type: "object",
+              discriminator: { propertyName: "kind" },
+              properties: {
+                kind: { type: "string" },
+                count: { type: "number" },
+              },
+            },
+          ],
+          unevaluatedProperties: { type: "boolean" },
+        },
+        want: `{
+    [key: string]: boolean | number;
+} & Omit<{
+    kind?: string;
+    count?: number;
+}, "kind">`,
+      },
+    ],
+    [
       "patternProperties > empty object",
       {
         given: { type: "object", patternProperties: {} },
