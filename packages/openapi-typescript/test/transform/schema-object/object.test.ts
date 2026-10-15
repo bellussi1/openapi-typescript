@@ -100,6 +100,39 @@ describe("transformSchemaObject > object", () => {
       },
     ],
     [
+      "unevaluatedProperties > basic",
+      {
+        given: { type: "object", unevaluatedProperties: { type: "string" } },
+        want: `{
+    [key: string]: string;
+}`,
+      },
+    ],
+    [
+      "unevaluatedProperties > true",
+      {
+        given: { type: "object", unevaluatedProperties: true },
+        want: `{
+    [key: string]: unknown;
+}`,
+      },
+    ],
+    [
+      "unevaluatedProperties > with properties",
+      {
+        given: {
+          type: "object",
+          properties: { property: { type: "string" } },
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    property?: string;
+} & {
+    [key: string]: string;
+}`,
+      },
+    ],
+    [
       "patternProperties > empty object",
       {
         given: { type: "object", patternProperties: {} },

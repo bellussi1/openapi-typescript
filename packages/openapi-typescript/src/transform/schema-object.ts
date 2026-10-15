@@ -528,6 +528,7 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
   if (
     ("properties" in schemaObject && schemaObject.properties && Object.keys(schemaObject.properties).length) ||
     ("additionalProperties" in schemaObject && schemaObject.additionalProperties) ||
+    ("unevaluatedProperties" in schemaObject && schemaObject.unevaluatedProperties) ||
     ("patternProperties" in schemaObject && schemaObject.patternProperties) ||
     ("$defs" in schemaObject && schemaObject.$defs)
   ) {
@@ -668,6 +669,15 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
       schemaObject.additionalProperties === true ||
       (typeof schemaObject.additionalProperties === "object" &&
         Object.keys(schemaObject.additionalProperties).length === 0);
+    const hasExplicitUnevaluatedProperties =
+      typeof schemaObject.unevaluatedProperties === "object" &&
+      schemaObject.unevaluatedProperties !== null &&
+      Object.keys(schemaObject.unevaluatedProperties).length > 0;
+    const hasImplicitUnevaluatedProperties =
+      schemaObject.unevaluatedProperties === true ||
+      (typeof schemaObject.unevaluatedProperties === "object" &&
+        schemaObject.unevaluatedProperties !== null &&
+        Object.keys(schemaObject.unevaluatedProperties).length === 0);
     const patternProperties = hasKey(schemaObject, "patternProperties") ? schemaObject.patternProperties : undefined;
     const hasExplicitPatternProperties =
       typeof patternProperties === "object" && patternProperties !== null && Object.keys(patternProperties).length > 0;
@@ -676,6 +686,12 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
       stringIndexTypes.push(transformSchemaObject(schemaObject.additionalProperties as SchemaObject, options, true));
     }
     if (hasImplicitAdditionalProperties || (!schemaObject.additionalProperties && options.ctx.additionalProperties)) {
+      stringIndexTypes.push(UNKNOWN);
+    }
+    if (hasExplicitUnevaluatedProperties) {
+      stringIndexTypes.push(transformSchemaObject(schemaObject.unevaluatedProperties as SchemaObject, options, true));
+    }
+    if (hasImplicitUnevaluatedProperties) {
       stringIndexTypes.push(UNKNOWN);
     }
     if (hasExplicitPatternProperties && patternProperties && typeof patternProperties === "object") {
