@@ -293,11 +293,11 @@ export function transformSchemaObjectWithComposition(
       return type.members.flatMap((member) => {
         // $defs is represented as a helper property in the generated type,
         // but it is not an evaluated JSON Schema property.
-        if (
-          !ts.isPropertySignature(member) ||
-          !member.type ||
-          (member.name && ts.isStringLiteral(member.name) && member.name.text === "$defs")
-        ) {
+        const isDefs =
+          member.name &&
+          ((ts.isIdentifier(member.name) && member.name.text === "$defs") ||
+            (ts.isStringLiteral(member.name) && member.name.text === "$defs"));
+        if (!ts.isPropertySignature(member) || !member.type || isDefs) {
           return [];
         }
         return [member.type];
@@ -311,9 +311,8 @@ export function transformSchemaObjectWithComposition(
    * so resolve them while collecting properties accepted by an
    * unevaluatedProperties index signature.
    */
-  function collectComposedPropertyTypes(
+  function collectReferencedCompositionPropertyTypes(
     schema: SchemaObject | ReferenceObject,
-    path: string | undefined,
     seenRefs = unevaluatedPropertiesRefs,
   ): ts.TypeNode[] {
     if ("$ref" in schema) {
@@ -327,32 +326,23 @@ export function transformSchemaObjectWithComposition(
           return [];
         }
 
-        return collectComposedPropertyTypes(resolved, schema.$ref, seenRefs);
+        return [
+          ...collectDeclaredPropertyTypes(
+            transformSchemaObject(resolved, { ...compositionOptions, path: schema.$ref }),
+          ),
+          ...collectReferencedCompositionPropertyTypes(resolved, seenRefs),
+        ];
       } finally {
         seenRefs.delete(schema.$ref);
       }
     }
 
-    // Resolve only this schema's direct properties here. Composition members
-    // are visited below, which avoids expanding a referenced schema as a whole.
-    const properties = "properties" in schema ? (schema.properties ?? {}) : {};
-    const validProperties = Object.fromEntries(
-      Object.entries(properties).filter(([, property]) => {
-        return (
-          (typeof property === "object" || typeof property === "boolean") &&
-          property !== null &&
-          !Array.isArray(property)
-        );
-      }),
-    ) as Record<string, SchemaObject | ReferenceObject>;
-    const coreType = transformSchemaObjectCore({ ...schema, properties: validProperties } as SchemaObject, {
-      ...compositionOptions,
-      path,
-    });
-    const output = coreType ? collectDeclaredPropertyTypes(coreType) : [];
+    // Inline branches are already represented by the transformed composition
+    // AST. Only descend to find references that cannot be inspected there.
+    const output: ts.TypeNode[] = [];
     for (const compositionKey of ["allOf", "anyOf", "oneOf"] as const) {
-      for (const [index, item] of (schema[compositionKey] ?? []).entries()) {
-        output.push(...collectComposedPropertyTypes(item, createRef([path, compositionKey, String(index)]), seenRefs));
+      for (const item of schema[compositionKey] ?? []) {
+        output.push(...collectReferencedCompositionPropertyTypes(item, seenRefs));
       }
     }
     return output;
@@ -383,12 +373,7 @@ export function transformSchemaObjectWithComposition(
     ? [
         ...compositionTypes.flatMap(collectDeclaredPropertyTypes),
         ...[...(schemaObject.allOf ?? []), ...(schemaObject.anyOf ?? []), ...(schemaObject.oneOf ?? [])].flatMap(
-          (item, index) =>
-            collectComposedPropertyTypes(
-              item,
-              createRef([options.path, "composition", String(index)]),
-              seenCompositionRefs,
-            ),
+          (item) => collectReferencedCompositionPropertyTypes(item, seenCompositionRefs),
         ),
       ]
     : [];

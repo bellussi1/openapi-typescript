@@ -189,6 +189,23 @@ describe("transformSchemaObject > object", () => {
       },
     ],
     [
+      "unevaluatedProperties > excludes the generated $defs helper",
+      {
+        given: {
+          type: "object",
+          allOf: [{ type: "object", $defs: { Internal: { type: "string" } } }],
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    [key: string]: string;
+} & {
+    $defs: {
+        Internal: string;
+    };
+}`,
+      },
+    ],
+    [
       "patternProperties > empty object",
       {
         given: { type: "object", patternProperties: {} },
