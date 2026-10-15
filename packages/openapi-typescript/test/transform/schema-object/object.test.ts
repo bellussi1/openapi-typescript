@@ -133,6 +133,21 @@ describe("transformSchemaObject > object", () => {
       },
     ],
     [
+      "unevaluatedProperties > preserves declared property types",
+      {
+        given: {
+          type: "object",
+          properties: { count: { type: "number" } },
+          unevaluatedProperties: { type: "string" },
+        },
+        want: `{
+    count?: number;
+} & {
+    [key: string]: string | number;
+}`,
+      },
+    ],
+    [
       "patternProperties > empty object",
       {
         given: { type: "object", patternProperties: {} },

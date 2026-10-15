@@ -499,6 +499,7 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
 
   // type: object
   const coreObjectType: ts.TypeElement[] = [];
+  const unevaluatedPropertyTypes: ts.TypeNode[] = [];
 
   // discriminators: explicit mapping on schema object
   for (const k of ["allOf", "anyOf"] as const) {
@@ -613,6 +614,9 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
 
         addJSDocComment(v, property);
         coreObjectType.push(property);
+        if (ts.isPropertySignature(property) && property.type) {
+          unevaluatedPropertyTypes.push(property.type);
+        }
       }
     }
 
@@ -693,6 +697,10 @@ function transformSchemaObjectCore(schemaObject: SchemaObject, options: Transfor
     }
     if (hasImplicitUnevaluatedProperties) {
       stringIndexTypes.push(UNKNOWN);
+    }
+    if (hasExplicitUnevaluatedProperties) {
+      // A TypeScript string index signature also constrains declared properties.
+      stringIndexTypes.push(...unevaluatedPropertyTypes);
     }
     if (hasExplicitPatternProperties && patternProperties && typeof patternProperties === "object") {
       for (const [_, v] of getEntries(
